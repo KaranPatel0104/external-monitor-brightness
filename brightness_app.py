@@ -828,7 +828,7 @@ class BrightnessApp(tk.Tk):
         number.pack(expand=True)
         hint = tk.Label(
             popup,
-            text="Use this number to match the monitor card",
+            text="Use this number to identify which monitor card corresponds to this display",
             font=("Segoe UI Semibold", 11, "bold"),
             fg="#d2f4ff",
             bg="#0a2234",
