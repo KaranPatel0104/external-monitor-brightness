@@ -3,6 +3,7 @@ import unittest
 from brightness_app import (
     Display,
     MIN_BRIGHTNESS,
+    get_displays,
     normalize_settings_payload,
     normalize_state_payload,
 )
@@ -51,6 +52,10 @@ class DisplayModelTests(unittest.TestCase):
         self.assertIn("left of primary", display.subtitle)
         self.assertEqual(display.width, 1920)
         self.assertEqual(display.height, 1080)
+
+    def test_get_displays_returns_list(self):
+        displays = get_displays()
+        self.assertIsInstance(displays, list)
 
 
 if __name__ == "__main__":

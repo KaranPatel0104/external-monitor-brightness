@@ -11,14 +11,66 @@ import tempfile
 import threading
 import time
 import traceback
-import winreg
 from dataclasses import dataclass
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
-import tkinter as tk
-from tkinter import messagebox, ttk
+from types import SimpleNamespace
 
-import win32api
-import win32con
+try:
+    import tkinter as tk
+    from tkinter import messagebox, ttk
+except Exception:
+    class _TkUnavailableWidget:
+        def __init__(self, *_args, **_kwargs) -> None:
+            raise RuntimeError("Tkinter is required to run the UI.")
+
+    class _TkVariableFallback:
+        def __init__(self, value=None) -> None:
+            self._value = value
+
+        def get(self):
+            return self._value
+
+        def set(self, value) -> None:
+            self._value = value
+
+    tk = SimpleNamespace(
+        Tk=_TkUnavailableWidget,
+        Toplevel=_TkUnavailableWidget,
+        Label=_TkUnavailableWidget,
+        Text=_TkUnavailableWidget,
+        Canvas=_TkUnavailableWidget,
+        Scale=_TkUnavailableWidget,
+        BooleanVar=_TkVariableFallback,
+        StringVar=_TkVariableFallback,
+    )
+    ttk = SimpleNamespace(
+        Frame=_TkUnavailableWidget,
+        Label=_TkUnavailableWidget,
+        Button=_TkUnavailableWidget,
+        Progressbar=_TkUnavailableWidget,
+        Scrollbar=_TkUnavailableWidget,
+        Checkbutton=_TkUnavailableWidget,
+        Combobox=_TkUnavailableWidget,
+        Style=_TkUnavailableWidget,
+    )
+    messagebox = SimpleNamespace(
+        askyesno=lambda *_args, **_kwargs: False,
+        showwarning=lambda *_args, **_kwargs: None,
+        showerror=lambda *_args, **_kwargs: None,
+    )
+
+try:
+    import winreg
+except Exception:
+    winreg = None
+
+try:
+    import win32api
+    import win32con
+except Exception:
+    win32api = None
+    win32con = None
 
 try:
     from PIL import Image, ImageDraw
@@ -46,6 +98,11 @@ APP_WINDOW_TITLE = "External Monitor Brightness"
 SINGLE_INSTANCE_MUTEX = "ExternalMonitorBrightness_SingleInstance_v1"
 ERROR_ALREADY_EXISTS = 183
 SW_RESTORE = 9
+LOG_MAX_BYTES = 1_048_576
+LOG_BACKUP_COUNT = 3
+STATE_SAVE_DEBOUNCE_MS = 250
+IDENTIFY_DURATION_OPTIONS = ("2", "3", "5", "10")
+IDENTIFY_DEFAULT_SECONDS = "3"
 
 LIGHT_THEME = {
     "root_bg": "#eef2f7",
@@ -149,11 +206,18 @@ def normalize_settings_payload(raw: object) -> dict[str, bool]:
 
 def setup_logging() -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    logging.basicConfig(
-        filename=LOG_FILE,
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(message)s",
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    for handler in list(root_logger.handlers):
+        root_logger.removeHandler(handler)
+    rotating_handler = RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=LOG_MAX_BYTES,
+        backupCount=LOG_BACKUP_COUNT,
+        encoding="utf-8",
     )
+    rotating_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    root_logger.addHandler(rotating_handler)
 
     def handle_exception(exc_type, exc, tb) -> None:
         logging.error("Uncaught exception", exc_info=(exc_type, exc, tb))
@@ -395,6 +459,9 @@ class BrightnessApp(tk.Tk):
         self._tray_thread: threading.Thread | None = None
         self._hotkeys_registered = False
         self._scrollbar_visible = False
+        self._save_after_id: str | None = None
+        self.identify_persistent = tk.BooleanVar(value=False)
+        self.identify_duration_seconds = tk.StringVar(value=IDENTIFY_DEFAULT_SECONDS)
 
         self._style()
         self._build()
@@ -490,6 +557,27 @@ class BrightnessApp(tk.Tk):
         ttk.Button(hero, style="SecondaryHeader.TButton", text="Reset All", command=self.reset_all).grid(
             row=1, column=1, sticky="e", padx=(10, 0), pady=(6, 0)
         )
+        quick_actions = ttk.Frame(hero, style="Hero.TFrame")
+        quick_actions.grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(quick_actions, text="Set all:", style="HeroSub.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Button(
+            quick_actions,
+            style="SecondaryHeader.TButton",
+            text="50%",
+            command=lambda: self._set_all_displays(50),
+        ).grid(row=0, column=1, sticky="w", padx=(0, 6))
+        ttk.Button(
+            quick_actions,
+            style="SecondaryHeader.TButton",
+            text="75%",
+            command=lambda: self._set_all_displays(75),
+        ).grid(row=0, column=2, sticky="w", padx=(0, 6))
+        ttk.Button(
+            quick_actions,
+            style="SecondaryHeader.TButton",
+            text="100%",
+            command=lambda: self._set_all_displays(100),
+        ).grid(row=0, column=3, sticky="w")
         controls = ttk.Frame(hero, style="Hero.TFrame")
         controls.grid(row=2, column=0, columnspan=2, sticky="w", pady=(10, 0))
         ttk.Checkbutton(
@@ -519,6 +607,20 @@ class BrightnessApp(tk.Tk):
             text="About / Help",
             command=self._show_about,
         ).grid(row=0, column=3, sticky="w", padx=(16, 0))
+        ttk.Checkbutton(
+            controls,
+            text="Persistent identify",
+            variable=self.identify_persistent,
+            style="HeroCheck.TCheckbutton",
+        ).grid(row=0, column=4, sticky="w", padx=(16, 0))
+        ttk.Label(controls, text="Identify duration (s):", style="HeroSub.TLabel").grid(row=0, column=5, sticky="w", padx=(10, 6))
+        ttk.Combobox(
+            controls,
+            state="readonly",
+            width=4,
+            textvariable=self.identify_duration_seconds,
+            values=IDENTIFY_DURATION_OPTIONS,
+        ).grid(row=0, column=6, sticky="w")
 
         content = ttk.Frame(root, style="Root.TFrame", padding=(12, 10, 12, 6))
         content.grid(row=1, column=0, sticky="nsew")
@@ -674,7 +776,7 @@ class BrightnessApp(tk.Tk):
 
     def set_brightness(self, display: Display, value: int) -> bool:
         ok = self.dimmer.set_brightness(display, value)
-        self._save_state()
+        self._schedule_state_save()
         if not ok:
             self.bell()
         return ok
@@ -724,8 +826,22 @@ class BrightnessApp(tk.Tk):
             bg="#0a2234",
         )
         number.pack(expand=True)
+        hint = tk.Label(
+            popup,
+            text="Use this number to match the monitor card",
+            font=("Segoe UI Semibold", 11, "bold"),
+            fg="#d2f4ff",
+            bg="#0a2234",
+        )
+        hint.pack(pady=(0, 16))
         self.bell()
-        self.after(3000, popup.destroy)
+        popup.bind("<Button-1>", lambda _event: popup.destroy())
+        if not self.identify_persistent.get():
+            try:
+                delay_ms = int(self.identify_duration_seconds.get()) * 1000
+            except ValueError:
+                delay_ms = int(IDENTIFY_DEFAULT_SECONDS) * 1000
+            self.after(max(1000, delay_ms), popup.destroy)
 
     def _toggle_theme(self) -> None:
         self._style()
@@ -798,6 +914,8 @@ class BrightnessApp(tk.Tk):
             card._changed(str(target))
 
     def _is_startup_enabled(self) -> bool:
+        if winreg is None:
+            return False
         try:
             with winreg.OpenKey(
                 winreg.HKEY_CURRENT_USER,
@@ -811,6 +929,10 @@ class BrightnessApp(tk.Tk):
             return False
 
     def _toggle_startup(self) -> None:
+        if winreg is None:
+            self.startup_enabled.set(False)
+            messagebox.showwarning("Startup Setting", "Startup setting is only available on Windows.")
+            return
         exe = Path(sys.executable)
         target = f'"{exe}" "{Path(__file__).resolve()}"' if exe.suffix.lower() == ".exe" and "python" in exe.name.lower() else f'"{exe}"'
         try:
@@ -833,9 +955,13 @@ class BrightnessApp(tk.Tk):
 
     def _toggle_hotkeys(self) -> None:
         self._apply_hotkey_registration()
-        self._save_state()
+        self._schedule_state_save()
 
     def _apply_hotkey_registration(self) -> None:
+        if win32con is None:
+            self._hotkeys_registered = False
+            self.hotkeys_enabled.set(False)
+            return
         hwnd = self.winfo_id()
         if self.hotkeys_enabled.get() and not self._hotkeys_registered:
             ok_bright = ctypes.windll.user32.RegisterHotKey(
@@ -856,6 +982,9 @@ class BrightnessApp(tk.Tk):
             self._hotkeys_registered = False
 
     def _poll_hotkeys(self) -> None:
+        if win32con is None:
+            self.after(HOTKEY_POLL_MS, self._poll_hotkeys)
+            return
         msg = ctypes.wintypes.MSG()
         while ctypes.windll.user32.PeekMessageW(
             ctypes.byref(msg), None, win32con.WM_HOTKEY, win32con.WM_HOTKEY, win32con.PM_REMOVE
@@ -937,7 +1066,7 @@ class BrightnessApp(tk.Tk):
 
     def _on_close_request(self) -> None:
         # Gamma ramps die with the process, so hide instead of exit.
-        if pystray is not None:
+        if self.tray_icon is not None:
             self._hide_window()
             return
         confirm = messagebox.askyesno(
@@ -949,6 +1078,7 @@ class BrightnessApp(tk.Tk):
 
     def _close(self) -> None:
         logging.info("Closing app")
+        self._flush_state_save()
         if self._hotkeys_registered:
             hwnd = self.winfo_id()
             ctypes.windll.user32.UnregisterHotKey(hwnd, HOTKEY_ID_BRIGHTER)
@@ -957,9 +1087,19 @@ class BrightnessApp(tk.Tk):
         if self.tray_icon is not None:
             self.tray_icon.stop()
             self.tray_icon = None
-        self._save_state()
         self.dimmer.close()
         self.destroy()
+
+    def _schedule_state_save(self) -> None:
+        if self._save_after_id:
+            self.after_cancel(self._save_after_id)
+        self._save_after_id = self.after(STATE_SAVE_DEBOUNCE_MS, self._flush_state_save)
+
+    def _flush_state_save(self) -> None:
+        if self._save_after_id:
+            self.after_cancel(self._save_after_id)
+            self._save_after_id = None
+        self._save_state()
 
 
 _single_instance_handle: int | None = None
@@ -983,6 +1123,8 @@ def acquire_single_instance() -> bool:
 
 
 def get_displays() -> list[Display]:
+    if win32api is None or win32con is None:
+        return []
     displays: list[Display] = []
     for index, monitor in enumerate(win32api.EnumDisplayMonitors()):
         handle, _dc, rect = monitor
