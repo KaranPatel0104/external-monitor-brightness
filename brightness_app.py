@@ -102,7 +102,7 @@ LOG_MAX_BYTES = 1_048_576
 LOG_BACKUP_COUNT = 3
 STATE_SAVE_DEBOUNCE_MS = 250
 IDENTIFY_DURATION_OPTIONS = ("2", "3", "5", "10")
-IDENTIFY_DEFAULT_SECONDS = "3"
+IDENTIFY_DEFAULT_SECONDS = 3
 
 LIGHT_THEME = {
     "root_bg": "#eef2f7",
@@ -461,7 +461,7 @@ class BrightnessApp(tk.Tk):
         self._scrollbar_visible = False
         self._save_after_id: str | None = None
         self.identify_persistent = tk.BooleanVar(value=False)
-        self.identify_duration_seconds = tk.StringVar(value=IDENTIFY_DEFAULT_SECONDS)
+        self.identify_duration_seconds = tk.StringVar(value=str(IDENTIFY_DEFAULT_SECONDS))
 
         self._style()
         self._build()
@@ -828,7 +828,7 @@ class BrightnessApp(tk.Tk):
         number.pack(expand=True)
         hint = tk.Label(
             popup,
-            text="Use this number to identify which monitor card corresponds to this display",
+            text="Match this number to the monitor card below",
             font=("Segoe UI Semibold", 11, "bold"),
             fg="#d2f4ff",
             bg="#0a2234",
@@ -840,7 +840,7 @@ class BrightnessApp(tk.Tk):
             try:
                 delay_ms = int(self.identify_duration_seconds.get()) * 1000
             except ValueError:
-                delay_ms = int(IDENTIFY_DEFAULT_SECONDS) * 1000
+                delay_ms = IDENTIFY_DEFAULT_SECONDS * 1000
             self.after(max(1000, delay_ms), popup.destroy)
 
     def _toggle_theme(self) -> None:

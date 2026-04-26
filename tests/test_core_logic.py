@@ -1,4 +1,7 @@
 import unittest
+from unittest.mock import patch
+
+import brightness_app
 
 from brightness_app import (
     Display,
@@ -56,6 +59,10 @@ class DisplayModelTests(unittest.TestCase):
     def test_get_displays_returns_list(self):
         displays = get_displays()
         self.assertIsInstance(displays, list)
+
+    def test_get_displays_returns_empty_when_win32_unavailable(self):
+        with patch.object(brightness_app, "win32api", None), patch.object(brightness_app, "win32con", None):
+            self.assertEqual(get_displays(), [])
 
 
 if __name__ == "__main__":
